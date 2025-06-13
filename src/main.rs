@@ -11,10 +11,13 @@ use std::collections::HashMap;
 mod vscode_client;
 mod web_server;
 
-// Constants for optimization
+// Adaptive timing constants for better responsiveness
 const MAX_CONCURRENT_TASKS: usize = 50;
-const UPDATE_INTERVAL_SECS: u64 = 5;
-const PROCESS_CACHE_TTL_SECS: u64 = 2; // Cache process list for 2 seconds
+const FAST_UPDATE_INTERVAL_SECS: u64 = 1; // When changes detected
+const SLOW_UPDATE_INTERVAL_SECS: u64 = 3; // When idle
+const PROCESS_CACHE_TTL_SECS: u64 = 1; // Reduced cache TTL
+const VSCODE_CHECK_INTERVAL_SECS: u64 = 2; // Much faster VSCode checks
+const IDLE_THRESHOLD_COUNT: u32 = 3; // Switch to slow mode after 3 unchanged cycles
 
 #[derive(Debug, Clone)]
 pub struct TieredApp {
@@ -33,11 +36,13 @@ pub struct OutputData {
     pub text: String,
 }
 
-// Cache structure for process information
+// Enhanced cache structure with change detection
 #[derive(Debug)]
 struct ProcessCache {
     processes: HashMap<String, RunningApp>,
     last_updated: SystemTime,
+    last_process_count: usize,
+    process_list_hash: u64,
 }
 
 impl ProcessCache {
@@ -45,11 +50,48 @@ impl ProcessCache {
         Self {
             processes: HashMap::new(),
             last_updated: SystemTime::UNIX_EPOCH,
+            last_process_count: 0,
+            process_list_hash: 0,
         }
     }
 
     fn is_expired(&self) -> bool {
         self.last_updated.elapsed().unwrap_or(Duration::MAX) > Duration::from_secs(PROCESS_CACHE_TTL_SECS)
+    }
+
+    // Calculate a simple hash of running process names for change detection
+    fn calculate_process_hash(processes: &[RunningApp]) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        
+        let mut hasher = DefaultHasher::new();
+        for app in processes {
+            app.name.hash(&mut hasher);
+            app.tier.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    fn has_processes_changed(&self, new_processes: &[RunningApp]) -> bool {
+        let new_hash = Self::calculate_process_hash(new_processes);
+        let new_count = new_processes.len();
+        
+        new_hash != self.process_list_hash || new_count != self.last_process_count
+    }
+
+    fn update_with_change_detection(&mut self, new_processes: Vec<RunningApp>) -> bool {
+        let has_changed = self.has_processes_changed(&new_processes);
+        
+        self.processes.clear();
+        for app in &new_processes {
+            self.processes.insert(app.name.clone(), app.clone());
+        }
+        
+        self.last_updated = SystemTime::now();
+        self.process_list_hash = Self::calculate_process_hash(&new_processes);
+        self.last_process_count = new_processes.len();
+        
+        has_changed
     }
 }
 
@@ -57,13 +99,14 @@ impl ProcessCache {
 pub async fn get_running_apps_optimized(
     apps_to_check: &[TieredApp],
     cache: &mut ProcessCache
-) -> Vec<RunningApp> {
+) -> (Vec<RunningApp>, bool) {
     // Return cached results if still valid
     if !cache.is_expired() {
-        return cache.processes.values()
+        let cached_results: Vec<RunningApp> = cache.processes.values()
             .filter(|app| apps_to_check.iter().any(|check| app.name.starts_with(&check.name)))
             .cloned()
             .collect();
+        return (cached_results, false); // No change, using cache
     }
 
     let mut running_apps = Vec::new();
@@ -73,7 +116,7 @@ pub async fn get_running_apps_optimized(
     // Read /proc directory
     let mut proc_dir = match fs::read_dir("/proc").await {
         Ok(dir) => dir,
-        Err(_) => return Vec::new(),
+        Err(_) => return (Vec::new(), false),
     };
     
     let apps_to_check = apps_to_check.to_vec(); // Convert slice to owned vec for move
@@ -121,17 +164,13 @@ pub async fn get_running_apps_optimized(
         }
     }
     
-    // Update cache
-    cache.processes.clear();
-    for app in &running_apps {
-        cache.processes.insert(app.name.clone(), app.clone());
-    }
-    cache.last_updated = SystemTime::now();
-    
     // Sort by tier only (first come first serve within tier)
     running_apps.sort_by(|a, b| a.tier.cmp(&b.tier));
     
-    running_apps
+    // Update cache and detect changes
+    let has_changed = cache.update_with_change_detection(running_apps.clone());
+    
+    (running_apps, has_changed)
 }
 
 /// Check if VS Code is running (optimized)
@@ -159,7 +198,7 @@ fn generate_app_text(app: &RunningApp, vscode_file_info: Option<&vscode_client::
     }
 }
 
-/// Optimized presence data updater with better resource management
+/// Optimized presence data updater with adaptive timing and smart change detection
 async fn update_presence_data(shared_data: web_server::SharedData, broadcaster: web_server::Broadcaster) {
     let apps_to_check = vec![
         // Tier 1 - The ones you wanna flex the most
@@ -182,16 +221,18 @@ async fn update_presence_data(shared_data: web_server::SharedData, broadcaster: 
     let mut process_cache = ProcessCache::new();
     let mut last_vscode_check = SystemTime::UNIX_EPOCH;
     let mut cached_vscode_info: Option<vscode_client::FileInfo> = None;
+    let mut idle_count = 0u32;
+    let mut last_output_text = String::new();
 
     loop {
-        let running_apps = get_running_apps_optimized(&apps_to_check, &mut process_cache).await;
+        let (running_apps, processes_changed) = get_running_apps_optimized(&apps_to_check, &mut process_cache).await;
         
-        // Optimize VSCode checks - only check if VSCode is running and cache is old
+        // Adaptive VSCode checks - faster when VSCode is running
         let mut vscode_file_info: Option<vscode_client::FileInfo> = None;
         
         if is_vscode_running(&running_apps) {
             let should_check_vscode = last_vscode_check.elapsed()
-                .unwrap_or(Duration::MAX) > Duration::from_secs(10); // Check VSCode every 10 seconds max
+                .unwrap_or(Duration::MAX) > Duration::from_secs(VSCODE_CHECK_INTERVAL_SECS);
             
             if should_check_vscode {
                 let vscode_port: u16 = env::var("REPRESENCE_VSCODE_PORT")
@@ -201,7 +242,7 @@ async fn update_presence_data(shared_data: web_server::SharedData, broadcaster: 
                 
                 // Use timeout for VSCode connection to prevent hanging
                 match tokio::time::timeout(
-                    Duration::from_secs(2),
+                    Duration::from_secs(1), // Reduced timeout for faster response
                     vscode_client::connect_to_vscode_once(vscode_port)
                 ).await {
                     Ok(Ok(file_info)) => {
@@ -229,21 +270,38 @@ async fn update_presence_data(shared_data: web_server::SharedData, broadcaster: 
             None => "idle".to_string(),
         };
 
-        let output = OutputData { text: output_text };
+        // Check if output actually changed
+        let output_changed = output_text != last_output_text;
+        
+        if output_changed {
+            let output = OutputData { text: output_text.clone() };
+            last_output_text = output_text;
+            idle_count = 0; // Reset idle counter on change
 
-        // Update shared data efficiently
-        {
-            let mut data = shared_data.write().await;
-            if data.text != output.text {  // Only update if changed
+            // Update shared data efficiently
+            {
+                let mut data = shared_data.write().await;
                 *data = output.clone();
                 
-                // Only broadcast if data actually changed
+                // Broadcast the change
                 let _ = broadcaster.send(output);
             }
+        } else if processes_changed {
+            // Processes changed but output is the same, reset idle counter
+            idle_count = 0;
+        } else {
+            // No changes detected
+            idle_count += 1;
         }
 
-        // Use tokio::time::sleep for better resource management
-        tokio::time::sleep(Duration::from_secs(UPDATE_INTERVAL_SECS)).await;
+        // Adaptive sleep timing based on activity
+        let sleep_duration = if idle_count >= IDLE_THRESHOLD_COUNT {
+            Duration::from_secs(SLOW_UPDATE_INTERVAL_SECS) // Slow polling when idle
+        } else {
+            Duration::from_secs(FAST_UPDATE_INTERVAL_SECS) // Fast polling when active
+        };
+
+        tokio::time::sleep(sleep_duration).await;
     }
 }
 
@@ -271,6 +329,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Represence server starting on http://0.0.0.0:3001");
     println!("API endpoint: http://0.0.0.0:3001/api/represence");
     println!("Health check: http://0.0.0.0:3001/health");
+    println!("Optimized for fast response times (1-3s adaptive polling)");
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3001").await?;
     axum::serve(listener, app).await?;
