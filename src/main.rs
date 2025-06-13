@@ -6,9 +6,15 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use std::time::Duration;
 use std::env;
+use std::collections::HashMap;
 
 mod vscode_client;
 mod web_server;
+
+// Constants for optimization
+const MAX_CONCURRENT_TASKS: usize = 50;
+const UPDATE_INTERVAL_SECS: u64 = 5;
+const PROCESS_CACHE_TTL_SECS: u64 = 2; // Cache process list for 2 seconds
 
 #[derive(Debug, Clone)]
 pub struct TieredApp {
@@ -16,11 +22,10 @@ pub struct TieredApp {
     tier: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RunningApp {
     name: String,
     tier: u32,
-    start_time: SystemTime,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -28,112 +33,50 @@ pub struct OutputData {
     pub text: String,
 }
 
-/// Asynchronously checks for running applications from a given list, organized by tiers
-/// 
-/// # Arguments
-/// * `apps_to_check` - Vector of tiered applications to look for
-/// 
-/// # Returns
-/// * `Vec<RunningApp>` - Vector of currently running applications, sorted by tier and start time
-pub async fn get_running_apps(apps_to_check: Vec<TieredApp>) -> Vec<RunningApp> {
-    let mut running_apps = Vec::new();
-    let mut tasks = JoinSet::new();
-    
-    // Read /proc directory
-    let mut proc_dir = match fs::read_dir("/proc").await {
-        Ok(dir) => dir,
-        Err(_) => return Vec::new(),
-    };
-    
-    // Collect all PID directories first
-    let mut pid_dirs = Vec::new();
-    while let Ok(Some(entry)) = proc_dir.next_entry().await {
-        let path = entry.path();
-        
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name.chars().all(|c| c.is_ascii_digit()) {
-                pid_dirs.push(path);
-            }
-        }
-    }
-    
-    // Process each PID directory concurrently
-    for pid_path in pid_dirs {
-        let apps_to_check_clone = apps_to_check.clone();
-        tasks.spawn(async move {
-            let exe_path = pid_path.join("exe");
-            let stat_path = pid_path.join("stat");
-            
-            // Try to read the exe symlink and stat file
-            if let (Ok(exe_target), Ok(stat_content)) = (
-                fs::read_link(&exe_path).await,
-                fs::read_to_string(&stat_path).await
-            ) {
-                if let Some(app_name) = exe_target.file_name().and_then(|n| n.to_str()) {
-                    // Get process start time from stat file
-                    let start_time = if let Some(start_time_str) = stat_content.split_whitespace().nth(21) {
-                        if let Ok(start_ticks) = start_time_str.parse::<u64>() {
-                            // Convert Linux jiffies to SystemTime
-                            let boot_time = SystemTime::now()
-                                .duration_since(SystemTime::UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs() - (start_ticks / 100);
-                            SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(boot_time)
-                        } else {
-                            SystemTime::now()
-                        }
-                    } else {
-                        SystemTime::now()
-                    };
-
-                    // Check if this app matches any from our list
-                    for check_app in &apps_to_check_clone {
-                        if app_name.starts_with(&check_app.name) {
-                            return Some(RunningApp {
-                                name: app_name.to_string(),
-                                tier: check_app.tier,
-                                start_time,
-                            });
-                        }
-                    }
-                }
-            }
-            None
-        });
-    }
-    
-    // Collect results from all tasks
-    while let Some(result) = tasks.join_next().await {
-        if let Ok(Some(running_app)) = result {
-            running_apps.push(running_app);
-        }
-    }
-    
-    // Sort by tier first, then by start time (newest first)
-    running_apps.sort_by(|a, b| {
-        a.tier.cmp(&b.tier).then_with(|| b.start_time.cmp(&a.start_time))
-    });
-    
-    running_apps
+// Cache structure for process information
+#[derive(Debug)]
+struct ProcessCache {
+    processes: HashMap<String, RunningApp>,
+    last_updated: SystemTime,
 }
 
-/// Alternative implementation with better error handling and concurrency control
-pub async fn get_running_apps_with_limit(
-    apps_to_check: Vec<TieredApp>, 
-    max_concurrent_tasks: usize
+impl ProcessCache {
+    fn new() -> Self {
+        Self {
+            processes: HashMap::new(),
+            last_updated: SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    fn is_expired(&self) -> bool {
+        self.last_updated.elapsed().unwrap_or(Duration::MAX) > Duration::from_secs(PROCESS_CACHE_TTL_SECS)
+    }
+}
+
+/// Optimized function to get running applications with resource limits and caching
+pub async fn get_running_apps_optimized(
+    apps_to_check: &[TieredApp],
+    cache: &mut ProcessCache
 ) -> Vec<RunningApp> {
-    use tokio::sync::Semaphore;
-    use std::sync::Arc;
-    
+    // Return cached results if still valid
+    if !cache.is_expired() {
+        return cache.processes.values()
+            .filter(|app| apps_to_check.iter().any(|check| app.name.starts_with(&check.name)))
+            .cloned()
+            .collect();
+    }
+
     let mut running_apps = Vec::new();
     let mut tasks = JoinSet::new();
-    let semaphore = Arc::new(Semaphore::new(max_concurrent_tasks));
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TASKS));
     
     // Read /proc directory
     let mut proc_dir = match fs::read_dir("/proc").await {
         Ok(dir) => dir,
         Err(_) => return Vec::new(),
     };
+    
+    let apps_to_check = apps_to_check.to_vec(); // Convert slice to owned vec for move
     
     // Process entries with concurrency limit
     while let Ok(Some(entry)) = proc_dir.next_entry().await {
@@ -147,35 +90,17 @@ pub async fn get_running_apps_with_limit(
                 tasks.spawn(async move {
                     let _permit = semaphore_clone.acquire().await.ok()?;
                     
+                    // Fast path: only read what we need
                     let exe_path = path.join("exe");
-                    let stat_path = path.join("stat");
                     
-                    if let (Ok(exe_target), Ok(stat_content)) = (
-                        fs::read_link(&exe_path).await,
-                        fs::read_to_string(&stat_path).await
-                    ) {
+                    if let Ok(exe_target) = fs::read_link(&exe_path).await {
                         if let Some(app_name) = exe_target.file_name().and_then(|n| n.to_str()) {
-                            // Get process start time from stat file
-                            let start_time = if let Some(start_time_str) = stat_content.split_whitespace().nth(21) {
-                                if let Ok(start_ticks) = start_time_str.parse::<u64>() {
-                                    let boot_time = SystemTime::now()
-                                        .duration_since(SystemTime::UNIX_EPOCH)
-                                        .unwrap()
-                                        .as_secs() - (start_ticks / 100);
-                                    SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(boot_time)
-                                } else {
-                                    SystemTime::now()
-                                }
-                            } else {
-                                SystemTime::now()
-                            };
-
+                            // Check if this app matches any from our list
                             for check_app in &apps_to_check_clone {
                                 if app_name.starts_with(&check_app.name) {
                                     return Some(RunningApp {
                                         name: app_name.to_string(),
                                         tier: check_app.tier,
-                                        start_time,
                                     });
                                 }
                             }
@@ -187,35 +112,40 @@ pub async fn get_running_apps_with_limit(
         }
     }
     
-    // Collect results
+    // Collect results with better error handling
     while let Some(result) = tasks.join_next().await {
-        if let Ok(Some(running_app)) = result {
-            running_apps.push(running_app);
+        match result {
+            Ok(Some(running_app)) => running_apps.push(running_app),
+            Ok(None) => continue,
+            Err(_) => continue, // Ignore task panics
         }
     }
     
-    // Sort by tier first, then by start time (newest first)
-    running_apps.sort_by(|a, b| {
-        a.tier.cmp(&b.tier).then_with(|| b.start_time.cmp(&a.start_time))
-    });
+    // Update cache
+    cache.processes.clear();
+    for app in &running_apps {
+        cache.processes.insert(app.name.clone(), app.clone());
+    }
+    cache.last_updated = SystemTime::now();
+    
+    // Sort by tier only (first come first serve within tier)
+    running_apps.sort_by(|a, b| a.tier.cmp(&b.tier));
     
     running_apps
 }
 
-/// Check if VS Code is running and return true if found
-/// You can also add extra functionalities for other applications, I found it somewhat hard to do so for applications that don't have extensions unfortunately. 
-async fn is_vscode_running(apps: &[RunningApp]) -> bool {
+/// Check if VS Code is running (optimized)
+fn is_vscode_running(apps: &[RunningApp]) -> bool {
     apps.iter().any(|app| app.name.starts_with("code"))
 }
 
-/// Generate text for an application based on its type and context
+/// Generate text for an application based on its type and context (optimized with string interpolation)
 fn generate_app_text(app: &RunningApp, vscode_file_info: Option<&vscode_client::FileInfo>) -> String {
     match app.name.as_str() {
         name if name.starts_with("code") => {
-            if let Some(file_info) = vscode_file_info {
-                format!("editing {} in VSCode", file_info.file_name)
-            } else {
-                "VS Code".to_string()
+            match vscode_file_info {
+                Some(file_info) => format!("editing {} in Visual Studio Code", file_info.file_name),
+                None => "VS Code".to_string(),
             }
         }
         name if name.starts_with("zen") => "browsing with Zen browser".to_string(),
@@ -229,8 +159,8 @@ fn generate_app_text(app: &RunningApp, vscode_file_info: Option<&vscode_client::
     }
 }
 
-/// Update presence data continuously, so everyone can know you're learning Haskell for the 1000th time
-async fn update_presence_data(shared_data: web_server::SharedData) {
+/// Optimized presence data updater with better resource management
+async fn update_presence_data(shared_data: web_server::SharedData, broadcaster: web_server::Broadcaster) {
     let apps_to_check = vec![
         // Tier 1 - The ones you wanna flex the most
         TieredApp { name: "code".to_string(), tier: 1 },
@@ -242,64 +172,81 @@ async fn update_presence_data(shared_data: web_server::SharedData) {
         TieredApp { name: "steam".to_string(), tier: 2 },
         
         // Tier 3 - Less common applications
-
         TieredApp { name: "vlc".to_string(), tier: 3 },
         TieredApp { name: "stremio".to_string(), tier: 3 },
         
-        // Tier 4 - Terminal emulators, if you use anything other than ghostty, ngmi
+        // Tier 4 - Terminal emulators
         TieredApp { name: "ghostty".to_string(), tier: 4 },
-
     ];
 
+    let mut process_cache = ProcessCache::new();
+    let mut last_vscode_check = SystemTime::UNIX_EPOCH;
+    let mut cached_vscode_info: Option<vscode_client::FileInfo> = None;
+
     loop {
-        let running_apps = get_running_apps(apps_to_check.clone()).await;
+        let running_apps = get_running_apps_optimized(&apps_to_check, &mut process_cache).await;
         
-        // Check if VS Code is running and try to get file information
+        // Optimize VSCode checks - only check if VSCode is running and cache is old
         let mut vscode_file_info: Option<vscode_client::FileInfo> = None;
         
-        if is_vscode_running(&running_apps).await {
-            // Get VS Code port from environment variable or use default
-            let vscode_port: u16 = env::var("REPRESENCE_VSCODE_PORT")
-                .unwrap_or_else(|_| "3847".to_string())
-                .parse()
-                .unwrap_or(3847);
+        if is_vscode_running(&running_apps) {
+            let should_check_vscode = last_vscode_check.elapsed()
+                .unwrap_or(Duration::MAX) > Duration::from_secs(10); // Check VSCode every 10 seconds max
             
-            // Try to connect and get current file info
-            match vscode_client::connect_to_vscode_once(vscode_port).await {
-                Ok(file_info) => {
-                    println!("VSCode connection successful: editing {}", file_info.file_name);
-                    vscode_file_info = Some(file_info);
+            if should_check_vscode {
+                let vscode_port: u16 = env::var("REPRESENCE_VSCODE_PORT")
+                    .unwrap_or_else(|_| "3847".to_string())
+                    .parse()
+                    .unwrap_or(3847);
+                
+                // Use timeout for VSCode connection to prevent hanging
+                match tokio::time::timeout(
+                    Duration::from_secs(2),
+                    vscode_client::connect_to_vscode_once(vscode_port)
+                ).await {
+                    Ok(Ok(file_info)) => {
+                        cached_vscode_info = Some(file_info.clone());
+                        vscode_file_info = Some(file_info);
+                        last_vscode_check = SystemTime::now();
+                    }
+                    Ok(Err(_)) | Err(_) => {
+                        // Use cached info if available, otherwise fallback
+                        vscode_file_info = cached_vscode_info.clone();
+                    }
                 }
-                Err(e) => {
-                    println!("VSCode connection failed: {}. Using fallback text.", e);
-                    // If we can't connect, VS Code might not have the extension installed
-                }
+            } else {
+                // Use cached VSCode info
+                vscode_file_info = cached_vscode_info.clone();
+            }
+        } else {
+            // Clear cached VSCode info if VSCode is not running
+            cached_vscode_info = None;
+        }
+
+        // Generate output text for the most relevant application
+        let output_text = match running_apps.first() {
+            Some(app) => generate_app_text(app, vscode_file_info.as_ref()),
+            None => "idle".to_string(),
+        };
+
+        let output = OutputData { text: output_text };
+
+        // Update shared data efficiently
+        {
+            let mut data = shared_data.write().await;
+            if data.text != output.text {  // Only update if changed
+                *data = output.clone();
+                
+                // Only broadcast if data actually changed
+                let _ = broadcaster.send(output);
             }
         }
 
-        // Generate output text for the most relevant application (highest tier, most recent)
-        let output_text = if let Some(app) = running_apps.first() {
-            generate_app_text(app, vscode_file_info.as_ref())
-        } else {
-            "idle".to_string()
-        };
-
-        let output = OutputData {
-            text: output_text,
-        };
-
-        // Update shared data
-        {
-            let mut data = shared_data.write().await;
-            *data = output;
-        }
-
-        // Wait before next update
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        // Use tokio::time::sleep for better resource management
+        tokio::time::sleep(Duration::from_secs(UPDATE_INTERVAL_SECS)).await;
     }
 }
 
-// Shit gets real
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load environment variables from .env file
@@ -313,16 +260,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Clone shared data for the background task
     let data_for_task = shared_data.clone();
 
+    // Create and start web server
+    let (app, broadcaster) = web_server::create_server(shared_data).await;
+
     // Start background task to update presence data
     tokio::spawn(async move {
-        update_presence_data(data_for_task).await;
+        update_presence_data(data_for_task, broadcaster).await;
     });
-
-    // Create and start web server
-    let app = web_server::create_server(shared_data).await;
     
     println!("Represence server starting on http://0.0.0.0:3001");
-    println!("API endpoint: http://0.0.0.0:3001/api/presence");
+    println!("API endpoint: http://0.0.0.0:3001/api/represence");
     println!("Health check: http://0.0.0.0:3001/health");
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3001").await?;

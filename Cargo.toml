@@ -3,17 +3,29 @@ name = "represence"
 version = "0.1.0"
 edition = "2021"
 
+[profile.release]
+# Optimize for binary size and performance
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
 [dependencies]
-axum = "0.7"
-reqwest = { version = "0.12.20", features = ["json"] }
-tokio = { version = "1.0", features = ["full"] }
-tokio-tungstenite = { version = "0.20", features = ["native-tls"] }
-futures-util = "0.3"
+axum = { version = "0.8", features = ["ws"] }
+reqwest = { version = "0.12.20", features = ["json"], default-features = false, optional = true }
+tokio = { version = "1.0", features = ["rt-multi-thread", "net", "fs", "time", "macros", "sync"] }
+tokio-tungstenite = { version = "0.27", features = ["native-tls"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 url = "2.4"
-tower = "0.4"
-tower-http = { version = "0.5", features = ["cors"] }
-hyper = { version = "1.0", features = ["full"] }
-chrono = { version = "0.4", features = ["serde"] }
+tower = { version = "0.5", default-features = false }
+tower-http = { version = "0.6", features = ["cors"], default-features = false }
+hyper = { version = "1.0", features = ["server", "http1"], default-features = false }
+chrono = { version = "0.4", features = ["serde", "clock"], default-features = false }
 dotenvy = "0.15"
+
+[features]
+default = []
+http-client = ["reqwest"]
