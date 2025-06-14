@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use futures_util::StreamExt;
-use url::Url;
 use std::time::Duration;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

@@ -1,238 +1,259 @@
 # represence
-like discord rich presence, but for anywhere!
 
-Stream your rich presence data, and fetch it to use however you'd like
+*Like Discord Rich Presence, but for anywhere!*
 
-## Detailed data
-Detailed data stream is only available for VSCode, with an help of an extension. I am open to PR's for more functionality
+A lightweight, adaptive presence detection system that monitors your current activity and provides real-time status updates via a REST API and WebSocket connection.
 
-## Installation
+## ✨ Features
+
+- **Smart Application Detection**: Automatically detects and prioritizes running applications
+- **VSCode Integration**: Deep integration with VS Code to show current file and project
+- **Tiered Priority System**: Prioritizes coding activities over browsing or entertainment
+- **Real-time Updates**: WebSocket support for live presence streaming
+- **Adaptive Polling**: Faster updates when active, slower when idle for optimal performance
+- **REST API**: Simple HTTP endpoints for presence data
+- **Lightweight**: Optimized Rust backend with minimal resource usage
+
+## 🎯 Detected Applications
+
+The system intelligently detects and categorizes applications by priority:
+
+**Tier 1 (Highest Priority)**
+- `code` - Visual Studio Code (shows current file when extension is installed)
+- `discord` - Discord
+
+**Tier 2 (Work & Browsing)**
+- `zen` - Zen Browser
+- `chrome` - Google Chrome  
+- `steam` - Steam
+
+**Tier 3 (Entertainment)**
+- `vlc` - VLC Media Player
+- `stremio` - Stremio
+
+**Tier 4 (Development Tools)**
+- `ghostty` - Ghostty Terminal
+
+## 🚀 Quick Start
 
 ### Prerequisites
 - [Rust](https://rustup.rs/) (latest stable version)
 - Git
 
-### Build and Install
+### Installation
 
-1. **Clone the repository:**
+1. **Clone and build:**
    ```bash
    git clone https://github.com/bilgi42/represence
    cd represence
-   ```
-
-2. **Build the project:**
-   ```bash
    cargo build --release
    ```
 
-3. **Install globally:**
+2. **Install globally:**
    ```bash
-   # Install to your system PATH
+   # Install via cargo (recommended)
    cargo install --path .
-   ```
-
-   Or manually copy the binary:
-   ```bash
-   # For manual installation, copy to a directory in your PATH
+   
+   # Or copy manually
    sudo cp target/release/represence /usr/local/bin/
-   # Make it executable
    sudo chmod +x /usr/local/bin/represence
    ```
 
-### Running as a Background Service
-
-#### Option 1: Using systemd (recommended for Linux)
-
-1. **Create a systemd service file:**
+3. **Run the service:**
    ```bash
-   sudo nano /etc/systemd/system/represence.service
+   # Run directly
+   represence
+   
+   # Or run in background
+   nohup represence > /dev/null 2>&1 &
    ```
 
-2. **Add the following content:**
-   ```ini
+### VSCode Extension (Optional but Recommended)
+
+For detailed file information when coding, install the companion VSCode extension:
+
+1. Download `represence-vscode-0.0.2.vsix` from the `represence-vscode` directory
+2. Install: `code --install-extension represence-vscode-0.0.2.vsix`
+3. The extension automatically starts when VSCode launches
+
+## ⚙️ Configuration
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `REPRESENCE_VSCODE_PORT` | `3847` | Port for VSCode extension WebSocket connection |
+
+### Example Configuration
+```bash
+export REPRESENCE_VSCODE_PORT=3847
+represence
+```
+
+## 🌐 API Reference
+
+The service runs on `http://localhost:3001` with the following endpoints:
+
+### REST Endpoints
+
+#### `GET /api/represence`
+Get current presence data.
+
+**Response:**
+```json
+{
+  "text": "editing main.rs in Visual Studio Code"
+}
+```
+
+#### `GET /health`
+Health check and service information.
+
+**Response:**
+```json
+{
+  "status": "healthy",
+  "timestamp": 1704067200,
+  "version": "0.1.0",
+  "endpoints": {
+    "presence": "/api/represence",
+    "websocket": "/ws/represence", 
+    "health": "/health"
+  }
+}
+```
+
+#### `GET /`
+API information and welcome message.
+
+### WebSocket Endpoint
+
+#### `WS /ws/represence`
+Real-time presence updates via WebSocket.
+
+**Example Usage:**
+```javascript
+const ws = new WebSocket('ws://localhost:3001/ws/represence');
+ws.onmessage = (event) => {
+  const presence = JSON.parse(event.data);
+  console.log('Current activity:', presence.text);
+};
+```
+
+## 🔧 Running as a Service
+
+### systemd (Linux)
+
+1. **Create service file:**
+   ```bash
+   sudo tee /etc/systemd/system/represence.service << EOF
    [Unit]
    Description=Represence Rich Presence Service
    After=network.target
 
    [Service]
    Type=simple
-   User=YOUR_USERNAME
-   ExecStart=/usr/local/bin/represence
+   User=$USER
+   ExecStart=$(which represence)
    Restart=always
    RestartSec=3
-   StandardOutput=null
-   StandardError=null
+   StandardOutput=journal
+   StandardError=journal
 
    [Install]
    WantedBy=multi-user.target
+   EOF
    ```
-   
-   Replace `YOUR_USERNAME` with your actual username.
 
-3. **Enable and start the service:**
+2. **Enable and start:**
    ```bash
    sudo systemctl daemon-reload
    sudo systemctl enable represence
    sudo systemctl start represence
-   ```
-
-4. **Check service status:**
-   ```bash
    sudo systemctl status represence
    ```
 
-#### Option 2: Running in background manually
+## 💡 Usage Examples
 
+### Fetch Current Status
 ```bash
-# Run in background with nohup
-nohup represence > /dev/null 2>&1 &
-
-# Or run detached
-represence &
-disown
+curl http://localhost:3001/api/represence
+# Output: {"text":"editing README.md in Visual Studio Code"}
 ```
 
-### Usage
-
-Once installed, you can:
-
-- **Start the service:** `represence`
-- **Run in background:** `represence &`
-- **Check if running:** `ps aux | grep represence`
-
-### Configuration
-
-The service will run silently in the background. By default, it should start automatically after installation as a systemd service.
-
-#### Environment Variables
-
-You can configure the service using environment variables:
-
-```bash
-# Allow specific domains to access the API (comma-separated)
-export REPRESENCE_DOMAIN_ALLOWED="https://your-vm-ip:3000,https://localhost:3000"
-
-# Configure VS Code extension port (default: 3847)
-export REPRESENCE_VSCODE_PORT=3847
-```
-
-#### Remote Access Configuration
-
-To send your presence data to your Ubuntu server VM:
-
-1. **Find your machine's IP address:**
-   ```bash
-   ip addr show | grep inet
-   # Or for external IP:
-   curl ifconfig.me
-   ```
-
-2. **Configure firewall (if needed):**
-   ```bash
-   # Allow port 3001 through firewall
-   sudo ufw allow 3001
-   # Or for specific IP only:
-   sudo ufw allow from YOUR_VM_IP to any port 3001
-   ```
-
-3. **Set environment variables for remote access:**
-   ```bash
-   # Create environment file
-   sudo mkdir -p /etc/represence
-   sudo tee /etc/represence/config.env << EOF
-   REPRESENCE_DOMAIN_ALLOWED="https://YOUR_VM_IP:3000,http://YOUR_VM_IP:3000"
-   REPRESENCE_VSCODE_PORT=3847
-   EOF
-   ```
-
-4. **Update systemd service to use environment file:**
-   ```bash
-   sudo nano /etc/systemd/system/represence.service
-   ```
-   
-   Update the service file to include the environment file:
-   ```ini
-   [Unit]
-   Description=Represence Rich Presence Service
-   After=network.target
-
-   [Service]
-   Type=simple
-   User=YOUR_USERNAME
-   EnvironmentFile=/etc/represence/config.env
-   ExecStart=/usr/local/bin/represence
-   Restart=always
-   RestartSec=3
-   StandardOutput=null
-   StandardError=null
-
-   [Install]
-   WantedBy=multi-user.target
-   ```
-
-5. **Restart the service:**
-   ```bash
-   sudo systemctl daemon-reload
-   sudo systemctl restart represence
-   ```
-
-#### Accessing from Your Ubuntu VM
-
-From your Ubuntu server VM, you can fetch the presence data:
-
-```bash
-# Replace YOUR_MACHINE_IP with your actual machine's IP
-curl http://YOUR_MACHINE_IP:3001/api/presence
-
-# Example response:
-# {"text":"editing main.rs in Visual Studio Code"}
-
-# Health check endpoint:
-curl http://YOUR_MACHINE_IP:3001/health
-```
-
-#### API Endpoints
-
-- **GET** `/api/presence` - Get current presence data
-- **GET** `/health` - Health check and configuration info  
-- **GET** `/` - API information
-
-#### Example Integration Script for Ubuntu VM
-
-Create a script on your Ubuntu VM to fetch and use the presence data:
-
+### Monitor Activity
 ```bash
 #!/bin/bash
-# save as fetch_presence.sh on your Ubuntu VM
-
-REPRESENCE_HOST="YOUR_MACHINE_IP:3001"
-
 while true; do
-    PRESENCE=$(curl -s "http://$REPRESENCE_HOST/api/presence" | jq -r '.text')
-    echo "$(date): $PRESENCE"
-    
-    # Do something with the presence data
-    # For example, log it or send to another service
-    
-    sleep 30
+  STATUS=$(curl -s http://localhost:3001/api/represence | jq -r '.text')
+  echo "$(date '+%H:%M:%S'): $STATUS"
+  sleep 10
 done
 ```
 
-### Uninstalling
+### JavaScript Integration
+```javascript
+async function getCurrentActivity() {
+  const response = await fetch('http://localhost:3001/api/represence');
+  const data = await response.json();
+  return data.text;
+}
+
+// Usage
+getCurrentActivity().then(activity => {
+  document.getElementById('status').textContent = activity;
+});
+```
+
+## 🔍 How It Works
+
+1. **Process Detection**: Scans `/proc` directory for running applications
+2. **Smart Caching**: Caches process information with change detection
+3. **Adaptive Timing**: 1-second updates when active, 3-second when idle
+4. **VSCode Integration**: Connects to VSCode extension via WebSocket for file details
+5. **Priority System**: Shows highest-priority activity from detected applications
+
+## 🛠️ Development
+
+### Building from Source
+```bash
+git clone https://github.com/bilgi42/represence
+cd represence
+cargo build --release
+```
+
+### Running Tests
+```bash
+cargo test
+```
+
+### Contributing
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests if applicable
+5. Submit a pull request
+
+## 🗑️ Uninstalling
 
 ```bash
-# Stop the service
+# Stop service (if using systemd)
 sudo systemctl stop represence
 sudo systemctl disable represence
-
-# Remove the service file
 sudo rm /etc/systemd/system/represence.service
 sudo systemctl daemon-reload
 
-# Remove the binary
-sudo rm /usr/local/bin/represence
-
-# Or if installed via cargo
+# Remove binary
 cargo uninstall represence
+# Or if installed manually:
+sudo rm /usr/local/bin/represence
 ```
+
+## 📝 License
+
+This project is open source. See the LICENSE file for details.
+
+---
+
+*Made with ❤️ for developers who want to share their current vibe*
 
