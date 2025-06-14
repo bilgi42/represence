@@ -4,6 +4,8 @@
 
 A lightweight, adaptive presence detection system that monitors your current activity and provides real-time status updates via a REST API and WebSocket connection.
 
+[VSCODE EXTENSION](https://github.com/bilgi42/represence-vscode)
+
 ![Screenshot From 2025-06-14 23-26-25](https://github.com/user-attachments/assets/586e10d0-8a72-443c-b745-74da63b39983)
 
 ![image](https://github.com/user-attachments/assets/9c9a541f-7a1c-4873-a052-c0b83e839b0d)
