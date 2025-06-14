@@ -87,17 +87,17 @@ For detailed file information when coding, install the companion VSCode extensio
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `REPRESENCE_VSCODE_PORT` | `3847` | Port for VSCode extension WebSocket connection |
+| `REPRESENCE_PORT` | `3001` | Port for the main API server |
 
 ### Example Configuration
 ```bash
-export REPRESENCE_VSCODE_PORT=3847
+export REPRESENCE_PORT=8080
 represence
 ```
 
 ## 🌐 API Reference
 
-The service runs on `http://localhost:3001` with the following endpoints:
+The service runs on `http://localhost:3001` (or your configured port) with the following endpoints:
 
 ### REST Endpoints
 
@@ -261,4 +261,3 @@ This project is open source. See the LICENSE file for details.
 ---
 
 *Made with ❤️ for developers who want to share their current vibe*
-

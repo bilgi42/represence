@@ -235,15 +235,10 @@ async fn update_presence_data(shared_data: web_server::SharedData, broadcaster: 
                 .unwrap_or(Duration::MAX) > Duration::from_secs(VSCODE_CHECK_INTERVAL_SECS);
             
             if should_check_vscode {
-                let vscode_port: u16 = env::var("REPRESENCE_VSCODE_PORT")
-                    .unwrap_or_else(|_| "3847".to_string())
-                    .parse()
-                    .unwrap_or(3847);
-                
                 // Use timeout for VSCode connection to prevent hanging
                 match tokio::time::timeout(
                     Duration::from_secs(1), // Reduced timeout for faster response
-                    vscode_client::connect_to_vscode_once(vscode_port)
+                    vscode_client::connect_to_vscode_once(3847)
                 ).await {
                     Ok(Ok(file_info)) => {
                         cached_vscode_info = Some(file_info.clone());
@@ -310,6 +305,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load environment variables from .env file
     dotenvy::dotenv().ok();
     
+    // Get port from environment variable or default to 3001
+    let port = env::var("REPRESENCE_PORT")
+        .unwrap_or_else(|_| "3001".to_string())
+        .parse::<u16>()
+        .unwrap_or(3001);
+    
     // Initialize shared data
     let shared_data = Arc::new(RwLock::new(OutputData {
         text: "starting...".to_string(),
@@ -326,12 +327,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         update_presence_data(data_for_task, broadcaster).await;
     });
     
-    println!("Represence server starting on http://0.0.0.0:3001");
-    println!("API endpoint: http://0.0.0.0:3001/api/represence");
-    println!("Health check: http://0.0.0.0:3001/health");
+    println!("Represence server starting on http://0.0.0.0:{}", port);
+    println!("API endpoint: http://0.0.0.0:{}/api/represence", port);
+    println!("Health check: http://0.0.0.0:{}/health", port);
     println!("Optimized for fast response times (1-3s adaptive polling)");
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3001").await?;
+    let bind_addr = format!("0.0.0.0:{}", port);
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     axum::serve(listener, app).await?;
 
     Ok(())
